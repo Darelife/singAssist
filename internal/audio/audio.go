@@ -161,27 +161,28 @@ Called by:
   - LoadAndAnalyzeSong after loading PCM data
 
 Task:
-  - Process audio in 10ms chunks
+  - Process audio in 30ms chunks for ~3x faster analysis
   - Detect fundamental frequency using autocorrelation
-  - Filter out silence and noise
+  - Triplicate each value to maintain 10ms output timing
 
 Logic:
- 1. Calculate step size: 10ms chunks (441 samples * 4 bytes = 1764 bytes)
+ 1. Calculate step size: 30ms chunks (1323 samples * 4 bytes = 5292 bytes)
  2. For each chunk:
     a. Convert bytes to float32 samples (left channel only)
-    b. Calculate energy, skip if below threshold (silence)
+    b. Calculate energy, mark as 0 if below threshold (silence)
     c. Run DetectPitch with mode-appropriate frequency range
     d. Filter non-vocal frequencies for ModeSinging
- 3. Append pitch value (Hz) or 0 (silence) to result
+ 3. Append pitch value 3 times to maintain 10ms timing
+ 4. Apply gap-filling for instrumental/full mix modes
 
 Output:
   - []float64: Pitch values at 10ms intervals (100 per second)
 */
 func analyzePitch(pcmBytes []byte, mode Mode) []float64 {
-	stepBytes := int(float64(config.SampleRate)*0.01) * 4
+	stepBytes := int(float64(config.SampleRate)*0.03) * 4
 	totalSamples := len(pcmBytes) / 4
 
-	songPitch := make([]float64, 0, totalSamples/stepBytes)
+	songPitch := make([]float64, 0, (totalSamples/stepBytes)*3)
 	floatBuf := make([]float32, stepBytes/4)
 
 	startTime := time.Now()
@@ -204,18 +205,17 @@ func analyzePitch(pcmBytes []byte, mode Mode) []float64 {
 		}
 
 		energy := CalculateEnergy(floatBuf)
+		var p float64
 		if energy < minEnergy {
-			songPitch = append(songPitch, 0)
-			continue
-		}
-
-		p := DetectPitch(floatBuf, minF, maxF)
-
-		if mode == ModeSinging && (p < 80 || p > 1000) {
 			p = 0
+		} else {
+			p = DetectPitch(floatBuf, minF, maxF)
+			if mode == ModeSinging && (p < 80 || p > 1000) {
+				p = 0
+			}
 		}
 
-		songPitch = append(songPitch, p)
+		songPitch = append(songPitch, p, p, p)
 	}
 
 	if mode == ModeInstrumental || mode == ModeFullMix {
