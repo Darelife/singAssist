@@ -1,4 +1,5 @@
-.venv310
-separated
-*.mp3
 singAssist
+.venv310/
+songs/
+*.log
+.DS_Store
