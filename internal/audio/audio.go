@@ -393,16 +393,24 @@ func DetectPitch(samples []float32, minFreq, maxFreq float64) float64 {
 	}
 
 	bestPeriod := 0
-	maxVal := 0.0
+	minDiff := 1e9
 
 	for tau := minPeriod; tau < maxPeriod; tau++ {
-		cross := 0.0
+		diff := 0.0
 		limit := n - tau
+
 		for i := 0; i < limit; i += 2 {
-			cross += float64(samples[i]) * float64(samples[i+tau])
+			delta := float64(samples[i]) - float64(samples[i+tau])
+			diff += delta * delta
 		}
-		if cross > maxVal {
-			maxVal = cross
+
+		normDiff := diff / float64(limit)
+
+		weight := 1.0 * (0.1 * float64(tau) / float64(n))
+		weightedDiff := normDiff * weight
+
+		if weightedDiff < minDiff {
+			minDiff = weightedDiff
 			bestPeriod = tau
 		}
 	}
