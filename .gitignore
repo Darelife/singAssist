@@ -3,3 +3,4 @@ singAssist
 songs/
 *.log
 .DS_Store
+pretrained_models

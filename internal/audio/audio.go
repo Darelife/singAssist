@@ -392,26 +392,62 @@ func DetectPitch(samples []float32, minFreq, maxFreq float64) float64 {
 		maxPeriod = n - 1
 	}
 
+	diff := make([]float64, maxPeriod)
+
+	// 1. Difference function
+	for tau := 1; tau < maxPeriod; tau++ {
+		d := 0.0
+		limit := n - tau
+		for i := 0; i < limit; i += 2 { // Skip-2 for performance
+			delta := float64(samples[i]) - float64(samples[i+tau])
+			d += delta * delta
+		}
+		diff[tau] = d
+	}
+
+	// 2. Cumulative mean normalized difference (CMNDF)
+	// This brilliant step mathematically prevents the algorithm from
+	// being tricked by super high frequencies (small tau).
+	cmndf := make([]float64, maxPeriod)
+	runningSum := 0.0
+	for tau := 1; tau < maxPeriod; tau++ {
+		runningSum += diff[tau]
+		if runningSum == 0 {
+			cmndf[tau] = 1.0
+		} else {
+			cmndf[tau] = diff[tau] * float64(tau) / runningSum
+		}
+	}
+
+	// 3. Absolute thresholding
+	// We scan forward and stop at the FIRST deep dip, guaranteeing
+	// we catch the fundamental pitch and ignore the lower sub-harmonics.
+	threshold := 0.15 // Standard YIN threshold
 	bestPeriod := 0
-	minDiff := 1e9
 
 	for tau := minPeriod; tau < maxPeriod; tau++ {
-		diff := 0.0
-		limit := n - tau
-
-		for i := 0; i < limit; i += 2 {
-			delta := float64(samples[i]) - float64(samples[i+tau])
-			diff += delta * delta
-		}
-
-		normDiff := diff / float64(limit)
-
-		weight := 1.0 * (0.1 * float64(tau) / float64(n))
-		weightedDiff := normDiff * weight
-
-		if weightedDiff < minDiff {
-			minDiff = weightedDiff
+		if cmndf[tau] < threshold {
 			bestPeriod = tau
+			// Ride the slope down to find the true local minimum of this dip
+			for t := tau + 1; t < maxPeriod; t++ {
+				if cmndf[t] < cmndf[bestPeriod] {
+					bestPeriod = t
+				} else {
+					break
+				}
+			}
+			break // Found it! Stop searching so we don't hit the sub-harmonic.
+		}
+	}
+
+	// 4. Fallback: If no dip crosses the strict threshold, just find the best minimum in range
+	if bestPeriod == 0 {
+		minVal := 1e9
+		for tau := minPeriod; tau < maxPeriod; tau++ {
+			if cmndf[tau] < minVal {
+				minVal = cmndf[tau]
+				bestPeriod = tau
+			}
 		}
 	}
 
