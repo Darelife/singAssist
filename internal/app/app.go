@@ -55,6 +55,8 @@ type App struct {
 
 	mu      sync.Mutex
 	message string
+
+	cameraMidi float64
 }
 
 /*
@@ -79,9 +81,10 @@ Output:
 */
 func New(songDir string) *App {
 	return &App{
-		state:     StateStartScreen,
-		songDir:   songDir,
-		userPitch: make([]float64, 0),
+		state:      StateStartScreen,
+		songDir:    songDir,
+		userPitch:  make([]float64, 0),
+		cameraMidi: 60.0,
 	}
 }
 
@@ -605,7 +608,7 @@ func (a *App) drawNoAudioMode(screen *ebiten.Image, sw, sh int) {
 	ebitenutil.DebugPrintAt(screen, stats, 10, 10)
 
 	if pitch > 10 {
-		vis := ui.NewPitchVisualizer(sw, sh)
+		vis := ui.NewPitchVisualizer(sw, sh, ui.FreqToMidi(pitch))
 		vis.DrawCurrentPitch(screen, pitch)
 	}
 
@@ -680,7 +683,16 @@ func (a *App) drawPlayingMode(screen *ebiten.Image, sw, sh int) {
 	}
 	ui.DrawNoteHUD(screen, sw, songDisplay, userDisplay)
 
-	vis := ui.NewPitchVisualizer(sw, sh)
+	targetMidi := a.cameraMidi
+	if songFreq > 10 {
+		targetMidi = ui.FreqToMidi(songFreq)
+	} else if pitch > 10 {
+		targetMidi = ui.FreqToMidi(pitch)
+	}
+
+	a.cameraMidi += (targetMidi - a.cameraMidi) * 0.05
+
+	vis := ui.NewPitchVisualizer(sw, sh, a.cameraMidi)
 	vis.DrawSongPitch(screen, a.songPitch, currTime, sw, sh)
 	vis.DrawUserPitch(screen, a.userPitch, a.songPitch, currTime, sw, sh)
 	vis.DrawCurrentPitch(screen, pitch)

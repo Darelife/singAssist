@@ -360,11 +360,11 @@ Logic:
 Output:
   - *PitchVisualizer: Configured for current screen size
 */
-func NewPitchVisualizer(sw, sh int) *PitchVisualizer {
+func NewPitchVisualizer(sw, sh int, cameraMidi float64) *PitchVisualizer {
 	return &PitchVisualizer{
 		OffsetY:  float64(sh) - 50,
-		ScaleY:   float64(sh-100) / 60.0,
-		BaseMidi: 30.0,
+		ScaleY:   float64(sh-100) / 40.0,
+		BaseMidi: cameraMidi - 20.0,
 		OffsetX:  float64(sw) * 0.2,
 	}
 }
@@ -423,13 +423,59 @@ Logic:
 Output:
   - None (draws to screen)
 */
+// func (v *PitchVisualizer) DrawSongPitch(screen *ebiten.Image, data []float64, currTime float64, sw, sh int) {
+// 	col := color.RGBA{100, 150, 255, 255}
+// 	stepSec := 0.01
+// 	chunkSize := 50
+// 	chunkSec := float64(chunkSize) * stepSec
+
+// 	var prevX, prevY float64
+// 	first := true
+
+// 	startIdx := int((currTime - 3.0) / stepSec)
+// 	if startIdx < 0 {
+// 		startIdx = 0
+// 	}
+// 	endIdx := int((currTime + 5.0) / stepSec)
+// 	if endIdx >= len(data) {
+// 		endIdx = len(data) - 1
+// 	}
+
+// 	for i := startIdx; i <= endIdx; i++ {
+// 		p := data[i]
+// 		if p <= 5 {
+// 			first = true
+// 			continue
+// 		}
+
+// 		t := float64(i) * stepSec
+// 		x := (t-currTime)*config.PixelsPerSec + v.OffsetX
+// 		y := v.FreqToY(p)
+
+// 		if y < 0 || y > float64(sh) {
+// 			first = true
+// 			continue
+// 		}
+
+// 		if !first {
+// 			ebitenutil.DrawLine(screen, prevX, prevY, x, y, col)
+// 		} else {
+// 			ebitenutil.DrawRect(screen, x, y, 3, 3, col)
+// 		}
+
+// 		prevX, prevY = x, y
+// 		first = false
+// 	}
+// }
+
 func (v *PitchVisualizer) DrawSongPitch(screen *ebiten.Image, data []float64, currTime float64, sw, sh int) {
-	col := color.RGBA{100, 150, 255, 255}
+	col := color.RGBA{100, 150, 255, 200} // Slightly transparent blue
+
 	stepSec := 0.01
+	chunkSize := 50 // 50 frames * 0.01s = 0.5 seconds
+	chunkSec := float64(chunkSize) * stepSec
 
-	var prevX, prevY float64
-	first := true
-
+	// Calculate visible range
 	startIdx := int((currTime - 3.0) / stepSec)
 	if startIdx < 0 {
 		startIdx = 0
@@ -439,30 +485,38 @@ func (v *PitchVisualizer) DrawSongPitch(screen *ebiten.Image, data []float64, cu
 		endIdx = len(data) - 1
 	}
 
-	for i := startIdx; i <= endIdx; i++ {
-		p := data[i]
-		if p <= 5 {
-			first = true
-			continue
+	// Align startIdx to exactly match chunk boundaries so the blocks don't jitter
+	startIdx = (startIdx / chunkSize) * chunkSize
+
+	for i := startIdx; i <= endIdx; i += chunkSize {
+		// Calculate average pitch for this 0.5s band
+		sumMidi := 0.0
+		count := 0
+		for j := 0; j < chunkSize && i+j < len(data); j++ {
+			if data[i+j] > 10 { // Only count non-silence
+				sumMidi += FreqToMidi(data[i+j])
+				count++
+			}
 		}
 
-		t := float64(i) * stepSec
-		x := (t-currTime)*config.PixelsPerSec + v.OffsetX
-		y := v.FreqToY(p)
+		// If at least 30% of this 0.5s band contains an actual note, draw the block
+		if count > int(float64(chunkSize)*0.3) {
+			avgMidi := sumMidi / float64(count)
 
-		if y < 0 || y > float64(sh) {
-			first = true
-			continue
+			// Calculate screen coordinates
+			y := v.OffsetY - (avgMidi-v.BaseMidi)*v.ScaleY
+			t := float64(i) * stepSec
+			x := (t-currTime)*config.PixelsPerSec + v.OffsetX
+
+			// Width is dynamically based on PixelsPerSec to lock onto the timeline perfectly.
+			// Subtracting 4 pixels from width creates a nice gap between consecutive blocks.
+			// (If you rigidly want 15px, you can set w := 15.0, but it might desync from the sweeping "now" line)
+			w := (chunkSec * float64(config.PixelsPerSec)) - 4.0
+			h := 5.0 // Fixed height as requested
+
+			// Draw the wide block
+			vector.DrawFilledRect(screen, float32(x), float32(y-h/2.0), float32(w), float32(h), col, false)
 		}
-
-		if !first {
-			ebitenutil.DrawLine(screen, prevX, prevY, x, y, col)
-		} else {
-			ebitenutil.DrawRect(screen, x, y, 3, 3, col)
-		}
-
-		prevX, prevY = x, y
-		first = false
 	}
 }
 
