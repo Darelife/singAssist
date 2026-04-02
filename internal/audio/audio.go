@@ -254,7 +254,6 @@ func calibrateSilenceFromAudio(pcmBytes []byte, stepBytes int, mode Mode) float6
 	if len(pcmBytes)/stepBytes < sampleCount {
 		sampleCount = len(pcmBytes) / stepBytes
 	}
-
 	energies := make([]float64, 0, sampleCount)
 	floatBuf := make([]float32, stepBytes/4)
 
