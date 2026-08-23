@@ -4,3 +4,4 @@ songs/
 *.log
 .DS_Store
 pretrained_models
+projectDetails.md

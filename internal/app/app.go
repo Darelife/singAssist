@@ -57,6 +57,9 @@ type App struct {
 	message string
 
 	cameraMidi float64
+
+	matchedFrames     int
+	totalVoicedFrames int
 }
 
 /*
@@ -365,8 +368,10 @@ Logic:
  4. Detect pitch using current mode settings
  5. Lock mutex
  6. If playing: append (time, pitch) to userPitch
- 7. Call pruneUserPitch to limit memory usage
- 8. Unlock mutex
+ 7. If the user is voiced and the song has a note at this instant,
+    tally it toward the running accuracy score
+ 8. Call pruneUserPitch to limit memory usage
+ 9. Unlock mutex
 
 Output:
   - None (appends to userPitch slice)
@@ -391,10 +396,38 @@ func (a *App) micLoop() {
 		if a.audioPlayer != nil && a.audioPlayer.IsPlaying() {
 			pos := a.audioPlayer.Position()
 			a.userPitch = append(a.userPitch, float64(pos.Milliseconds()), pitch)
+
+			if pitch > 10 {
+				sIdx := int(pos.Seconds() * 100)
+				if sIdx >= 0 && sIdx < len(a.songPitch) && a.songPitch[sIdx] > 10 {
+					a.totalVoicedFrames++
+					if math.Abs(ui.FreqToMidi(pitch)-ui.FreqToMidi(a.songPitch[sIdx])) < 0.7 {
+						a.matchedFrames++
+					}
+				}
+			}
+
 			a.pruneUserPitch(pos.Milliseconds())
 		}
 		a.mu.Unlock()
 	}
+}
+
+/*
+AccuracyPercent returns the running percentage of voiced frames where the
+user's pitch matched the song's pitch within tolerance.
+
+Called by:
+  - App.drawPlayingMode for the live accuracy HUD
+
+Output:
+  - float64: 0-100, or 0 if no voiced frames have been scored yet
+*/
+func (a *App) AccuracyPercent() float64 {
+	if a.totalVoicedFrames == 0 {
+		return 0
+	}
+	return float64(a.matchedFrames) / float64(a.totalVoicedFrames) * 100
 }
 
 /*
@@ -513,6 +546,8 @@ func (a *App) cleanup() {
 	a.songPitch = nil
 	a.userPitch = make([]float64, 0)
 	a.message = ""
+	a.matchedFrames = 0
+	a.totalVoicedFrames = 0
 }
 
 /*
@@ -682,6 +717,7 @@ func (a *App) drawPlayingMode(screen *ebiten.Image, sw, sh int) {
 		IsMatched: isMatched,
 	}
 	ui.DrawNoteHUD(screen, sw, songDisplay, userDisplay)
+	ui.DrawAccuracy(screen, sw, a.AccuracyPercent())
 
 	targetMidi := a.cameraMidi
 	if songFreq > 10 {

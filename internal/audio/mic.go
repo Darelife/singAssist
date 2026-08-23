@@ -123,6 +123,8 @@ Fields:
   - Buffer: Audio sample buffer (float32, mono)
   - Done: Channel to signal goroutine shutdown
   - Smoother: Pitch smoothing instance
+  - Tracker: Online Viterbi decoder over pYIN candidates (octave-jump
+    suppression and temporal smoothing before the moving-average pass)
   - Pitch: Current detected pitch (updated by DetectPitchFromMic)
   - Threshold: Noise gate threshold (set by Calibrate)
 */
@@ -131,6 +133,7 @@ type MicHandler struct {
 	Buffer    []float32
 	Done      chan struct{}
 	Smoother  *Smoother
+	Tracker   *OnlinePitchTracker
 	Pitch     float64
 	Threshold float64
 }
@@ -145,11 +148,12 @@ Called by:
   - App.startGame when starting new session
 
 Task:
-  - Initialize microphone handler with buffer and smoother
+  - Initialize microphone handler with buffer, smoother, and tracker
 
 Logic:
  1. Allocate buffer of config.BufferSize samples
  2. Create smoother with window of 5
+ 3. Create a fresh online pitch tracker (no path history)
 
 Output:
   - *MicHandler: Handler ready for Start() call
@@ -158,6 +162,7 @@ func NewMicHandler() *MicHandler {
 	return &MicHandler{
 		Buffer:   make([]float32, config.BufferSize),
 		Smoother: NewSmoother(5),
+		Tracker:  NewOnlinePitchTracker(),
 	}
 }
 
@@ -352,15 +357,19 @@ Called by:
 
 Task:
   - Gate noise below threshold
-  - Detect and smooth pitch from microphone buffer
+  - Detect, Viterbi-smooth, and moving-average-smooth pitch from the
+    microphone buffer
 
 Logic:
  1. Calculate energy of current buffer
- 2. If below threshold: set Pitch to 0, return 0
+ 2. If below threshold: reset the Viterbi tracker (so the next voiced
+    phrase doesn't inherit a stale path), set Pitch to 0, return 0
  3. Set frequency range based on mode (narrower for singing)
- 4. Run DetectPitch on buffer
- 5. Apply smoothing
- 6. Store in m.Pitch and return
+ 4. Compute weighted pYIN candidates via yinDiffFFT + pyinCandidates
+ 5. Feed candidates through the online Viterbi tracker to suppress
+    octave jumps and pick this frame's pitch
+ 6. Apply moving-average smoothing on top for micro-jitter
+ 7. Store in m.Pitch and return
 
 Output:
   - float64: Detected pitch in Hz (0 if below threshold)
@@ -369,6 +378,7 @@ func (m *MicHandler) DetectPitchFromMic(mode Mode) float64 {
 	energy := CalculateEnergy(m.Buffer)
 	if energy < m.Threshold {
 		m.Pitch = 0
+		m.Tracker.Reset()
 		return 0
 	}
 
@@ -376,8 +386,14 @@ func (m *MicHandler) DetectPitchFromMic(mode Mode) float64 {
 	if mode == ModeSinging {
 		minF, maxF = 85.0, 1100.0
 	}
+	minPeriod := int(float64(config.SampleRate) / maxF)
+	maxPeriod := int(float64(config.SampleRate) / minF)
 
-	rawPitch := DetectPitch(m.Buffer, minF, maxF)
+	diff := yinDiffFFT(m.Buffer, maxPeriod)
+	cmndf := cmndfFromDiff(diff)
+	cands := pyinCandidates(cmndf, minPeriod, maxPeriod, config.SampleRate)
+
+	rawPitch := m.Tracker.Step(cands)
 	m.Pitch = m.Smoother.Smooth(rawPitch)
 	return m.Pitch
 }

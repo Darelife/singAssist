@@ -323,6 +323,44 @@ func DrawNoteHUD(screen *ebiten.Image, sw int, songNote, userNote NoteDisplay) {
 }
 
 /*
+DrawAccuracy renders the running live precision score: the percentage of
+voiced frames where the user's pitch matched the song's pitch within
+tolerance, colored red/yellow/green by how well the session is going.
+
+Input:
+  - screen: *ebiten.Image - Target drawing surface
+  - sw: int - Screen width
+  - pct: float64 - Accuracy percentage, 0-100
+
+Called by:
+  - App.drawPlayingMode, alongside the note HUD
+
+Logic:
+ 1. Format as "ACCURACY: NN%"
+ 2. Pick a color band: gray at 0%, red under 50%, yellow under 80%,
+    green at 80%+
+ 3. Draw centered near the top of the screen
+
+Output:
+  - None (draws to screen)
+*/
+func DrawAccuracy(screen *ebiten.Image, sw int, pct float64) {
+	col := color.RGBA{140, 140, 140, 255}
+	if pct >= 80 {
+		col = color.RGBA{80, 220, 80, 255}
+	} else if pct >= 50 {
+		col = color.RGBA{230, 200, 60, 255}
+	} else if pct > 0 {
+		col = color.RGBA{220, 90, 90, 255}
+	}
+
+	txt := fmt.Sprintf("ACCURACY: %.0f%%", pct)
+	if smallFont != nil {
+		text.Draw(screen, txt, smallFont, sw/2-50, 30, col)
+	}
+}
+
+/*
 PitchVisualizer handles coordinate transformations and pitch graph rendering.
 
 Fields:

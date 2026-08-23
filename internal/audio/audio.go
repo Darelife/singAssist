@@ -162,18 +162,24 @@ Called by:
 
 Task:
   - Process audio in 30ms chunks for ~3x faster analysis
-  - Detect fundamental frequency using autocorrelation
-  - Triplicate each value to maintain 10ms output timing
+  - Detect fundamental frequency per chunk via FFT-accelerated pYIN
+    (multi-threshold candidate generation)
+  - Viterbi-decode each contiguous voiced segment to smooth the pitch
+    track and suppress octave jumps, then triplicate each value to
+    maintain 10ms output timing
 
 Logic:
  1. Calculate step size: 30ms chunks (1323 samples * 4 bytes = 5292 bytes)
  2. For each chunk:
     a. Convert bytes to float32 samples (left channel only)
-    b. Calculate energy, mark as 0 if below threshold (silence)
-    c. Run DetectPitch with mode-appropriate frequency range
-    d. Filter non-vocal frequencies for ModeSinging
- 3. Append pitch value 3 times to maintain 10ms timing
- 4. Apply gap-filling for instrumental/full mix modes
+    b. If energy is below threshold: flush any buffered voiced segment
+    through Viterbi decoding, then record silence
+    c. Otherwise: compute weighted pitch candidates (yinDiffFFT +
+    pyinCandidates) and buffer them into the current segment
+ 3. Flush the final segment once chunk processing ends
+ 4. Filter non-vocal frequencies for ModeSinging
+ 5. Append each decoded pitch value 3 times to maintain 10ms timing
+ 6. Apply gap-filling for instrumental/full mix modes
 
 Output:
   - []float64: Pitch values at 10ms intervals (100 per second)
@@ -182,20 +188,38 @@ func analyzePitch(pcmBytes []byte, mode Mode) []float64 {
 	stepBytes := int(float64(config.SampleRate)*0.03) * 4
 	totalSamples := len(pcmBytes) / 4
 
-	songPitch := make([]float64, 0, (totalSamples/stepBytes)*3)
-	floatBuf := make([]float32, stepBytes/4)
-
-	startTime := time.Now()
-	log.Println("Starting pitch analysis...")
-
 	minF, maxF := 40.0, 2000.0
 	if mode == ModeSinging {
 		minF = 100.0
 		maxF = 1200.0
 	}
+	minPeriod := int(float64(config.SampleRate) / maxF)
+	maxPeriod := int(float64(config.SampleRate) / minF)
 
 	minEnergy := calibrateSilenceFromAudio(pcmBytes, stepBytes, mode)
 	log.Printf("Calibrated silence threshold: %.6f", minEnergy)
+
+	numChunks := totalSamples / (stepBytes / 4)
+	chunkPitch := make([]float64, 0, numChunks)
+	floatBuf := make([]float32, stepBytes/4)
+
+	var segment [][]PitchCandidate
+	flushSegment := func() {
+		if len(segment) == 0 {
+			return
+		}
+		decoded := viterbiDecodeSegment(segment)
+		for _, f := range decoded {
+			if mode == ModeSinging && (f < 80 || f > 1000) {
+				f = 0
+			}
+			chunkPitch = append(chunkPitch, f)
+		}
+		segment = nil
+	}
+
+	startTime := time.Now()
+	log.Println("Starting pitch analysis...")
 
 	for i := 0; i < len(pcmBytes)-stepBytes; i += stepBytes {
 		chunk := pcmBytes[i : i+stepBytes]
@@ -205,16 +229,27 @@ func analyzePitch(pcmBytes []byte, mode Mode) []float64 {
 		}
 
 		energy := CalculateEnergy(floatBuf)
-		var p float64
 		if energy < minEnergy {
-			p = 0
-		} else {
-			p = DetectPitch(floatBuf, minF, maxF)
-			if mode == ModeSinging && (p < 80 || p > 1000) {
-				p = 0
-			}
+			flushSegment()
+			chunkPitch = append(chunkPitch, 0)
+			continue
 		}
 
+		diff := yinDiffFFT(floatBuf, maxPeriod)
+		cmndf := cmndfFromDiff(diff)
+		cands := pyinCandidates(cmndf, minPeriod, maxPeriod, config.SampleRate)
+		if len(cands) == 0 {
+			flushSegment()
+			chunkPitch = append(chunkPitch, 0)
+			continue
+		}
+
+		segment = append(segment, cands)
+	}
+	flushSegment()
+
+	songPitch := make([]float64, 0, len(chunkPitch)*3)
+	for _, p := range chunkPitch {
 		songPitch = append(songPitch, p, p, p)
 	}
 
@@ -348,112 +383,6 @@ func fillShortGaps(pitches []float64, maxGapFrames int) []float64 {
 	}
 
 	return result
-}
-
-/*
-DetectPitch estimates fundamental frequency using autocorrelation.
-
-Input:
-  - samples: []float32 - Audio samples normalized to [-1, 1]
-  - minFreq: float64 - Minimum frequency to detect (Hz)
-  - maxFreq: float64 - Maximum frequency to detect (Hz)
-
-Called by:
-  - analyzePitch when processing song audio
-  - MicHandler.DetectPitchFromMic when processing microphone input
-
-Task:
-  - Find the dominant periodic component in the signal
-
-Logic:
- 1. Convert frequency bounds to sample periods (period = sampleRate / freq)
- 2. For each candidate period (lag τ):
-    a. Compute autocorrelation: sum of sample[i] * sample[i+τ]
-    b. Skip every other sample for 2x speedup
- 3. Find period with maximum correlation
- 4. Convert best period back to frequency
-
-Output:
-  - float64: Detected frequency in Hz, or 0 if no pitch found
-*/
-func DetectPitch(samples []float32, minFreq, maxFreq float64) float64 {
-	n := len(samples)
-	if n == 0 {
-		return 0
-	}
-
-	minPeriod := int(float64(config.SampleRate) / maxFreq)
-	maxPeriod := int(float64(config.SampleRate) / minFreq)
-	if minPeriod < 2 {
-		minPeriod = 2
-	}
-	if maxPeriod >= n {
-		maxPeriod = n - 1
-	}
-
-	diff := make([]float64, maxPeriod)
-
-	// 1. Difference function
-	for tau := 1; tau < maxPeriod; tau++ {
-		d := 0.0
-		limit := n - tau
-		for i := 0; i < limit; i += 2 { // Skip-2 for performance
-			delta := float64(samples[i]) - float64(samples[i+tau])
-			d += delta * delta
-		}
-		diff[tau] = d
-	}
-
-	// 2. Cumulative mean normalized difference (CMNDF)
-	// This brilliant step mathematically prevents the algorithm from
-	// being tricked by super high frequencies (small tau).
-	cmndf := make([]float64, maxPeriod)
-	runningSum := 0.0
-	for tau := 1; tau < maxPeriod; tau++ {
-		runningSum += diff[tau]
-		if runningSum == 0 {
-			cmndf[tau] = 1.0
-		} else {
-			cmndf[tau] = diff[tau] * float64(tau) / runningSum
-		}
-	}
-
-	// 3. Absolute thresholding
-	// We scan forward and stop at the FIRST deep dip, guaranteeing
-	// we catch the fundamental pitch and ignore the lower sub-harmonics.
-	threshold := 0.15 // Standard YIN threshold
-	bestPeriod := 0
-
-	for tau := minPeriod; tau < maxPeriod; tau++ {
-		if cmndf[tau] < threshold {
-			bestPeriod = tau
-			// Ride the slope down to find the true local minimum of this dip
-			for t := tau + 1; t < maxPeriod; t++ {
-				if cmndf[t] < cmndf[bestPeriod] {
-					bestPeriod = t
-				} else {
-					break
-				}
-			}
-			break // Found it! Stop searching so we don't hit the sub-harmonic.
-		}
-	}
-
-	// 4. Fallback: If no dip crosses the strict threshold, just find the best minimum in range
-	if bestPeriod == 0 {
-		minVal := 1e9
-		for tau := minPeriod; tau < maxPeriod; tau++ {
-			if cmndf[tau] < minVal {
-				minVal = cmndf[tau]
-				bestPeriod = tau
-			}
-		}
-	}
-
-	if bestPeriod == 0 {
-		return 0
-	}
-	return float64(config.SampleRate) / float64(bestPeriod)
 }
 
 /*
